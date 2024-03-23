@@ -1,0 +1,102 @@
+image: node
+
+variables:
+  CNAME: -website-alm.surge.sh
+
+stages:
+  - test
+  - package
+  - deploy
+
+test website:
+  stage: test
+  before_script:
+    - npm install -g broken-link-checker wait-on 
+  script:
+    - cd website
+    - npm install && npm run start & 
+    - wait-on http://localhost:3000 --timeout 30000
+    - blc --recursive --exclude-external http://localhost:3000
+
+vulnerabilites check:
+  stage: test
+  before_script:
+    - npm install -g snyk@^1.1281.0
+  script: 
+    - cd website
+    - snyk test 
+
+package website:
+  stage: package
+  cache:
+    key: site-package
+    policy: push
+    paths:
+      - ./website/build
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    paths: 
+      - ./website/build/test-site
+    expire_in: 2h
+    when: always
+  script:
+    - cd website
+    - npm install
+    - npm run build
+
+deploy to develop: &deploy
+  stage: deploy
+  variables: 
+    GIT_STRATEGY: none
+  cache:
+    key: site-package
+    policy: pull
+    paths:
+      - ./website/build
+  before_script:
+    - npm install -g surge@^0.23.1
+  script: 
+    - surge --project ./website/build/test-site --domain ${CI_ENVIRONMENT_NAME}${CNAME}
+  environment: 
+    name: develop
+    url: https://${CI_ENVIRONMENT_NAME}${CNAME}
+  only: 
+    - develop
+
+deploy to release:
+  <<: *deploy
+  environment: 
+    name: $CI_COMMIT_REF_SLUG
+    on_stop: turnoff
+  only: 
+    - /^release-.*$/
+
+turnoff:
+  <<: *deploy
+  script: 
+    - surge teardown ${CI_ENVIRONMENT_NAME}${CNAME}
+  environment:
+    name: $CI_COMMIT_REF_SLUG 
+    action: stop
+  when: manual
+  only: 
+    - /^release-.*$/
+
+deploy to production: 
+  <<: *deploy
+  variables:
+    AWS_CLI_LINK: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+    AWS_DEFAULT_REGION: us-east-2
+    AWS_BUCKET_NAME: my-static-website-testing
+  before_script:
+    - curl "${AWS_CLI_LINK}" -o "awscliv2.zip"
+    - unzip awscliv2.zip
+    - ./aws/install
+  script:
+    - export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+    - aws s3 sync ./website/build/test-site/ s3://${AWS_BUCKET_NAME}/
+  environment: 
+    name: production
+    url: http://${AWS_BUCKET_NAME}.s3-website.${AWS_DEFAULT_REGION}.amazonaws.com
+  only: 
+    - master
